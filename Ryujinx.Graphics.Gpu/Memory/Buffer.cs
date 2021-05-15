@@ -36,6 +36,11 @@ namespace Ryujinx.Graphics.Gpu.Memory
         public ulong EndAddress => Address + Size;
 
         /// <summary>
+        /// Increments when the buffer is (partially) unmapped or disposed.
+        /// </summary>
+        public int UnmappedSequence { get; private set; }
+
+        /// <summary>
         /// Ranges of the buffer that have been modified on the GPU.
         /// Ranges defined here cannot be updated from CPU until a CPU waiting sync point is reached.
         /// Then, write tracking will signal, wait for GPU sync (generated at the syncpoint) and flush these regions.
@@ -45,9 +50,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// </remarks>
         private BufferModifiedRangeList _modifiedRanges = null;
 
-        private CpuMultiRegionHandle _memoryTrackingGranular;
-
-        private CpuRegionHandle _memoryTracking;
+        private readonly CpuMultiRegionHandle _memoryTrackingGranular;
+        private readonly CpuRegionHandle _memoryTracking;
 
         private readonly RegionSignal _externalFlushDelegate;
         private readonly Action<ulong, ulong> _loadDelegate;
@@ -131,6 +135,17 @@ namespace Ryujinx.Graphics.Gpu.Memory
         }
 
         /// <summary>
+        /// Checks if a given range is fully contained in the buffer.
+        /// </summary>
+        /// <param name="address">Start address of the range</param>
+        /// <param name="size">Size in bytes of the range</param>
+        /// <returns>True if the range is contained, false otherwise</returns>
+        public bool FullyContains(ulong address, ulong size)
+        {
+            return address >= Address && address + size <= EndAddress;
+        }
+
+        /// <summary>
         /// Performs guest to host memory synchronization of the buffer data.
         /// </summary>
         /// <remarks>
@@ -147,7 +162,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
             }
             else
             {
-                if (_memoryTracking.Dirty && _context.SequenceNumber != _sequenceNumber)
+                if (_context.SequenceNumber != _sequenceNumber && _memoryTracking.DirtyOrVolatile())
                 {
                     _memoryTracking.Reprotect();
 
@@ -317,6 +332,18 @@ namespace Ryujinx.Graphics.Gpu.Memory
         }
 
         /// <summary>
+        /// Set a region of the buffer directly.
+        /// </summary>
+        /// <param name="mAddress">Start address of the modified region</param>
+        /// <param name="data">Data to write</param>
+        public void SetData(ulong mAddress, ReadOnlySpan<byte> data)
+        {
+            int offset = (int)(mAddress - Address);
+
+            _context.Renderer.SetBufferData(Handle, offset, data);
+        }
+
+        /// <summary>
         /// Performs copy of all the buffer data from one buffer to another.
         /// </summary>
         /// <param name="destination">The destination buffer to copy the data into</param>
@@ -385,6 +412,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
         public void Unmapped(ulong address, ulong size)
         {
             _modifiedRanges?.Clear(address, size);
+
+            UnmappedSequence++;
         }
 
         /// <summary>
@@ -398,6 +427,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
             _memoryTracking?.Dispose();
 
             _context.Renderer.DeleteBuffer(Handle);
+
+            UnmappedSequence++;
         }
     }
 }
